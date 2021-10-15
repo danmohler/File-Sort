@@ -1,7 +1,8 @@
 # Author:                   Dan Mohler
-# FileCopyRename.py         A program to sort files using account numbers
-# Last modified             3/9/2019
-# Python Version            Python 3.7.2
+# FileSort.py               A program to sort files using account numbers
+# Last modified             10/14/2021
+# Python Version            Python 3.7.4
+
 
 # Application Notes
 # Parameters are specified in the following order:
@@ -10,54 +11,163 @@
 # folderDir is the location of directory that contains subfolders to copy files
 # -d is a flag that specifies debug mode
 
+# file format
+# "YYYY-MM-DD Name ACCOUNT_NUMBER"
+
+
 import sys, argparse, sqlite3, shutil, os
 
+class FileSort:
+    def __init__(self, year, folderDir, fileDir):
+        self.year = year
+        self.folderDir = folderDir
+        self.fileDir = fileDir
+
+        # set length of account numbers
+        self.ACCOUNT_LENGTH = 3
+        self.FILE_END_LENGTH = self.ACCOUNT_LENGTH + 1
+
+        # Minimum file length requires character, space, and account
+        self.MIN_FILE_LENGTH = self.ACCOUNT_LENGTH + 2
+
+        # Number of digits used to specify year
+        self.YEAR_LENGTH = 4
+
+        # Create dictionary to store file structure of disk
+        self.fileDB = {}
+
+        self.totalFiles = 0
+        self.ignoredFiles = 0
+        self.totalFolders = 0
+        self.accountFolders = 0
+
+        if not (self.InputValidation()):
+            sys.exit("Input validation failed")
+
+    def InputValidation(self):
+        # verify that directory exists to be parsed
+        if not (os.path.isdir(self.folderDir)):
+            print(f"{self.folderDir} is not a valid file directory.")
+            return False
+
+        # Verify that year is a number
+        if not self.year.isnumeric():
+            print(f"{self.year} is not a valid year.")
+            return False
+
+        return True
+
+    def ValidateAccountDir(self, basename):
+        # Function validates that output directory basename has proper
+        # formatting to match a year and an account
+        # Returns True if a valid output directory basename
+        # Returns False if not a a valid output directory basename
+
+        # verify that directory is sufficiently long
+        # and has proper "...Name ACCOUNT_NUMBER" end formatting
+        if (len(basename) < self.MIN_FILE_LENGTH):
+            return False
+        elif (basename[-self.FILE_END_LENGTH] != ' '):
+            return False
+        elif not (basename[-self.ACCOUNT_LENGTH:].isnumeric()):
+            return False
+
+        # Add folder if the year matches
+        if (basename[:self.YEAR_LENGTH] == self.year):
+            return True
+        # Add folder if it has no year
+        elif not (basename[:self.YEAR_LENGTH].isnumeric()):
+            return True
+        else:
+            return False
 
 
-def parseDir(directory, database, year):
-    # This function performs directory parsing
-    # print("Input Source: %s\tdirectory" % (directory))
+    def ParseDir(self, directory=None):
+        # This function performs directory parsing
+        if directory is None:
+            directory = self.folderDir
 
-    # verify that directory exists to be parsed
-    if not (os.path.isdir(directory)):
-        print("% is not a valid file directory." % (directory))
-        sys.exit()
+        endDir = os.path.basename(directory)
+        self.totalFolders += 1
 
-    endDir = os.path.basename(directory)
-    # print("file %s" % (endFile))
+        if self.ValidateAccountDir(endDir):
+            numbers = endDir[-self.ACCOUNT_LENGTH:]
+            self.fileDB[numbers] = {
+                'full_directory': directory,
+                'basename': endDir
+            }
+            self.accountFolders += 1
 
-    # verify that file is sufficiently long
-    if (len(endDir) >= 4):
-        shortDir = endDir[-4:]
-        if (shortDir[0] == ' ' and shortDir[1:].isnumeric() ):
-            numbers = shortDir[1:]
-            # do not add folders from other years
-            if not (endDir[:4].isnumeric() and endDir[:4] != year):
-                # code to update SQL database
-                try:
-                    cursor = database.cursor()
-                    cursor.execute('''INSERT INTO accounts(num, year, fullDir, endDir)
-                        VALUES(?,?,?,?)''', (numbers, year, directory, endDir))
-                    cursor.close()
-                except Exception as e:
-                    print(e)
-                    print(" Record to be inserted has the following values:")
-                    print("num: ", numbers)
-                    print("year: ", year)
-                    print("fullDir: ", directory)
-                    print("endDir: ", endDir)
+        # For every subdirectory (next sublevel), call function with new path
+        for item in os.listdir(directory):
+            nextDir = os.path.join(directory, item)
+            if os.path.isdir(nextDir):
+                self.ParseDir(nextDir)
 
-    # print(os.listdir(directory))
-    for item in os.listdir(directory):
-        if os.path.isdir(os.path.join(directory, item)):
-            parseDir(os.path.join(directory, item), database, year)
-    # for every subdirectory (next sublevel), call function with new path
-    return;
+        return;
+
+    def FileValidate(self, directory, filename):
+        # Check if the file exists
+        if not os.path.isfile(os.path.join(directory, filename)):
+            return False
+
+        filenameNoExt = os.path.splitext(filename)[0]
+
+        if (len(filenameNoExt) < self.MIN_FILE_LENGTH):
+            return False
+        elif filenameNoExt[-self.FILE_END_LENGTH:-self.ACCOUNT_LENGTH] != ' ':
+            return False
+
+        accountNumber = filenameNoExt[-self.ACCOUNT_LENGTH:]
+        if not (accountNumber.isnumeric()):
+            return False
+        elif not (accountNumber in self.fileDB):
+            return False
+
+        # if file has year, require match, if not place in current year
+        if (filenameNoExt[:self.YEAR_LENGTH] == self.year):
+            return True
+        elif not (filenameNoExt[:self.YEAR_LENGTH].isnumeric()):
+            return True
+        else:
+            return False
+
+    def Deduplicate(self, filepath, filename):
+        i = 2
+
+        newFn = filename
+        fnNoExt = os.path.splitext(filename)[0]
+        ext = os.path.splitext(filename)[1]
+        fnNoAccount = fnNoExt[:-self.FILE_END_LENGTH]
+        fileEnd = fnNoExt[-self.FILE_END_LENGTH:]
+
+        # Check for existing file
+        while os.path.isfile(os.path.join(filepath, newFn)):
+            newFn = fnNoAccount + '-' + str(i) + fileEnd + ext
+            i += 1
+        return newFn
+
+    def FileMove(self):
+        # perform file move for each file in the filing directory
+        for filename in os.listdir(self.fileDir):
+            self.totalFiles += 1
+            if self.FileValidate(self.fileDir, filename):
+                fnNoExt = os.path.splitext(filename)[0]
+                fnAccount = fnNoExt[-self.ACCOUNT_LENGTH:]
+
+                # Get directory for file
+                destPath = self.fileDB[fnAccount]['full_directory']
+                destFilename = self.Deduplicate(destPath, filename)
+
+                shutil.move(os.path.join(self.fileDir, filename), os.path.join(destPath, destFilename))
+            else:
+                self.ignoredFiles += 1
+
 
 if __name__ == '__main__':
     # parser initialization
     parser = argparse.ArgumentParser(
-        description = "File sort by account numbers."
+        description = "Sorts files into folders based on account numbers."
     )
     # parameter specification
     parser.add_argument('fileDir', help = "Directory of files to copy")
@@ -65,51 +175,10 @@ if __name__ == '__main__':
     parser.add_argument('year', help = "Year to copy files")
     # argument parsing
     args = parser.parse_args()
-
-    # current directory
-    if not args.year.isnumeric():
-        print("% is not a valid year." % (args.year))
-        sys.exit()
-
-    numDB = sqlite3.connect(':memory:')
-    d = numDB.cursor()
-    d.execute('''CREATE TABLE accounts(num TEXT, year TEXT, fullDir TEXT, endDir TEXT UNIQUE)''')
-    numDB.commit()
-    # build database
-    parseDir(args.folderDir, numDB, args.year)
-
-    # print table
-    #d.execute('''SELECT num, endDir FROM accounts''')
-    #for row in d:
-        #print('{0} : {1}'.format(row[0], row[1]))
-
-    # perform file move
-    for item in os.listdir(args.fileDir):
-        if os.path.isfile(os.path.join(args.fileDir, item)):
-            itemName = os.path.splitext(item)[0]
-            if (len(itemName) > 5 and itemName[-4:-3] == ' ' and itemName[-3:].isnumeric()):
-                itemNumber = itemName[-3:]
-                # if file has year, require match, if not place in current year
-                if (itemName[:4] == args.year or not itemName[:4].isnumeric()):
-                    try:
-                        d.execute('''SELECT fullDir FROM accounts WHERE year=? AND num=?''', (args.year, itemNumber))
-                        result = d.fetchone()
-                        if result is not None:
-                            if (os.path.isfile(os.path.join(result[0], item))):
-                                i = 2
-                                while True:
-                                    fileName = itemName[:-4]+'-'+str(i)+itemName[-4:]+os.path.splitext(item)[1]
-                                    if not (os.path.isfile(os.path.join(result[0],fileName))):
-                                        break
-                                    i+=1
-                                shutil.move(os.path.join(args.fileDir, item), os.path.join(result[0], fileName))
-                            else:
-                                shutil.move(os.path.join(args.fileDir, item), os.path.join(result[0], item))
-                    except Exception as e:
-                        print(e)
-
-    # cleanup
-    d.execute('''DROP TABLE accounts''')
-    numDB.commit()
-    d.close()
-    numDB.close()
+    print(f'Year:{args.year} Folder:{args.folderDir} File:{args.fileDir}')
+    filer = FileSort(args.year, args.folderDir, args.fileDir)
+    filer.ParseDir()
+    filer.FileMove()
+    print(f'{filer.accountFolders} account folders were found out of {filer.totalFolders} folders in directory.')
+    print(f'{filer.totalFiles-filer.ignoredFiles} of {filer.totalFiles} files were moved.')
+    print(f'{filer.ignoredFiles} files were ignored.')
